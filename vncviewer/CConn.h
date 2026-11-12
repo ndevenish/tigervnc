@@ -102,6 +102,8 @@ private:
 
   static void handleUpdateTimeout(void *data);
 
+  std::string credentialsKey();
+
 private:
   std::string serverHost;
   int serverPort;
@@ -120,6 +122,12 @@ private:
   struct timeval updateStartTime;
   size_t updateStartPos;
   unsigned long long bpsEstimate;
+
+  // Credentials remembered between sessions (system keychain)
+  bool usedStoredCredentials;
+  bool storeCredentials;
+  std::string pendingUsername;
+  std::string pendingPassword;
 
   static std::string savedUsername;
   static std::string savedPassword;

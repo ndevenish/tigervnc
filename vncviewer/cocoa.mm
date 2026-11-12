@@ -28,6 +28,7 @@
 
 #import <Cocoa/Cocoa.h>
 #import <ApplicationServices/ApplicationServices.h>
+#import <Security/Security.h>
 
 #include "cocoa.h"
 
@@ -269,4 +270,85 @@ void cocoa_set_cursor_pos(int x, int y)
   new_pos.x = x;
   new_pos.y = y;
   CGWarpMouseCursorPosition(new_pos);
+}
+
+static NSMutableDictionary* keychain_query(const char* server)
+{
+  NSString* service;
+
+  service = [@"TigerVNC: " stringByAppendingString:
+              [NSString stringWithUTF8String:server]];
+
+  return [NSMutableDictionary dictionaryWithObjectsAndKeys:
+           (__bridge id)kSecClassGenericPassword, (__bridge id)kSecClass,
+           service, (__bridge id)kSecAttrService,
+           nil];
+}
+
+bool cocoa_keychain_load(const char* server,
+                         std::string* user, std::string* password)
+{
+  @autoreleasepool {
+    NSMutableDictionary* query;
+    CFTypeRef result;
+    NSDictionary* item;
+    NSString* account;
+    NSData* data;
+
+    query = keychain_query(server);
+    [query setObject:(__bridge id)kSecMatchLimitOne
+              forKey:(__bridge id)kSecMatchLimit];
+    [query setObject:@YES forKey:(__bridge id)kSecReturnAttributes];
+    [query setObject:@YES forKey:(__bridge id)kSecReturnData];
+
+    result = nullptr;
+    if (SecItemCopyMatching((__bridge CFDictionaryRef)query,
+                            &result) != errSecSuccess)
+      return false;
+
+    item = (__bridge NSDictionary*)result;
+    account = [item objectForKey:(__bridge id)kSecAttrAccount];
+    data = [item objectForKey:(__bridge id)kSecValueData];
+
+    if (data == nil) {
+      CFRelease(result);
+      return false;
+    }
+
+    *user = (account != nil) ? [account UTF8String] : "";
+    password->assign((const char*)[data bytes], [data length]);
+
+    CFRelease(result);
+
+    return true;
+  }
+}
+
+bool cocoa_keychain_store(const char* server,
+                          const char* user, const char* password)
+{
+  @autoreleasepool {
+    NSMutableDictionary* item;
+
+    // Replace rather than update, so that the entry ends up owned by
+    // the currently running binary
+    cocoa_keychain_remove(server);
+
+    item = keychain_query(server);
+    [item setObject:[NSString stringWithUTF8String:user]
+             forKey:(__bridge id)kSecAttrAccount];
+    [item setObject:[NSData dataWithBytes:password
+                                   length:strlen(password)]
+             forKey:(__bridge id)kSecValueData];
+
+    return SecItemAdd((__bridge CFDictionaryRef)item,
+                      nullptr) == errSecSuccess;
+  }
+}
+
+void cocoa_keychain_remove(const char* server)
+{
+  @autoreleasepool {
+    SecItemDelete((__bridge CFDictionaryRef)keychain_query(server));
+  }
 }

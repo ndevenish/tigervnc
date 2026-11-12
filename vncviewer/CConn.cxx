@@ -70,6 +70,10 @@
 #include "parameters.h"
 #include "vncviewer.h"
 
+#ifdef __APPLE__
+#include "cocoa.h"
+#endif
+
 std::string CConn::savedUsername;
 std::string CConn::savedPassword;
 
@@ -93,7 +97,8 @@ CConn::CConn()
     msgTimer(this, &CConn::processNextMsg), desktop(nullptr),
     audioOutput(nullptr),
     updateCount(0), pixelCount(0),
-    lastServerEncoding((unsigned int)-1), bpsEstimate(20000000)
+    lastServerEncoding((unsigned int)-1), bpsEstimate(20000000),
+    usedStoredCredentials(false), storeCredentials(false)
 {
   setShared(::shared);
 
@@ -316,6 +321,11 @@ void CConn::processNextMsg(core::Timer*)
   } catch (rfb::auth_error& e) {
     savedUsername.clear();
     savedPassword.clear();
+#ifdef __APPLE__
+    // Don't keep presenting something the server doesn't accept
+    if (usedStoredCredentials)
+      cocoa_keychain_remove(credentialsKey().c_str());
+#endif
     vlog.error(_("Authentication failed: %s"), e.what());
     abort_connection(_("Failed to authenticate with the server. Reason "
                        "given by the server:\n\n%s"), e.what());
@@ -340,6 +350,25 @@ void CConn::processNextMsg(core::Timer*)
     when |= FL_WRITE;
 
   Fl::add_fd(sock->getFd(), when, socketEvent, this);
+}
+
+// Identifies the server when remembering credentials. Empty if we
+// don't have a stable name for the peer.
+std::string CConn::credentialsKey()
+{
+  if (serverHost.empty())
+    return "";
+
+#ifndef WIN32
+  // The server is then just a random local port
+  if (strlen(via) > 0)
+    return "";
+#endif
+
+  if (serverPort == 0)
+    return serverHost;
+
+  return core::format("%s:%d", serverHost.c_str(), serverPort);
 }
 
 ////////////////////// CConnection callback methods //////////////////////
@@ -393,7 +422,28 @@ void CConn::getUserPasswd(std::string *user, std::string *password)
     return;
   }
 
+#ifdef __APPLE__
+  std::string key = credentialsKey();
+
+  if (!key.empty() && !usedStoredCredentials) {
+    std::string storedUser, storedPassword;
+
+    if (cocoa_keychain_load(key.c_str(), &storedUser, &storedPassword) &&
+        (!user || !storedUser.empty())) {
+      vlog.info(_("Using stored credentials for %s"), key.c_str());
+      usedStoredCredentials = true;
+      if (user)
+        *user = storedUser;
+      *password = storedPassword;
+      return;
+    }
+  }
+
+  AuthDialog d(isSecure(), user != nullptr, password != nullptr,
+               !key.empty());
+#else
   AuthDialog d(isSecure(), user != nullptr, password != nullptr);
+#endif
   d.show();
   while (d.shown())
     Fl::wait();
@@ -415,6 +465,13 @@ void CConn::getUserPasswd(std::string *user, std::string *password)
     *password = d.getPassword();
     if (keepPasswd)
       savedPassword = d.getPassword();
+
+    // Stored once we know that the server accepts them
+    storeCredentials = d.getSavePassword();
+    if (storeCredentials) {
+      pendingUsername = user ? d.getUser() : "";
+      pendingPassword = d.getPassword();
+    }
   }
 
   if (ret_val != 1)
@@ -426,6 +483,18 @@ void CConn::getUserPasswd(std::string *user, std::string *password)
 // server the pixel format and encodings to use and request the first update.
 void CConn::initDone()
 {
+#ifdef __APPLE__
+  if (storeCredentials) {
+    if (!cocoa_keychain_store(credentialsKey().c_str(),
+                              pendingUsername.c_str(),
+                              pendingPassword.c_str()))
+      vlog.error(_("Failed to store credentials in the keychain"));
+  }
+#endif
+  storeCredentials = false;
+  pendingUsername.clear();
+  pendingPassword.clear();
+
   desktop = new DesktopWindow(server.width(), server.height(), this);
 
   // Force a switch to the format and encoding we'd like
